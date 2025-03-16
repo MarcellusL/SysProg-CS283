@@ -10,8 +10,9 @@
 #include <fcntl.h>
 
 //INCLUDES for extra credit
-//#include <signal.h>
-//#include <pthread.h>
+#include <signal.h>
+#include <pthread.h>
+static int use_threads = 0;
 //-------------------------
 
 #include "dshlib.h"
@@ -53,6 +54,8 @@ int start_server(char *ifaces, int port, int is_threaded){
     //TODO:  If you are implementing the extra credit, please add logic
     //       to keep track of is_threaded to handle this feature
     //
+
+    use_threads = is_threaded;
 
     svr_socket = boot_server(ifaces, port);
     if (svr_socket < 0){
@@ -214,6 +217,8 @@ int process_cli_requests(int svr_socket){
     struct sockaddr_in cli_addr;
     socklen_t cli_len = sizeof(cli_addr);
 
+    extern int use_threads;
+
     while(1){
         // TODO use the accept syscall to create cli_socket 
         // and then exec_client_requests(cli_socket)
@@ -228,204 +233,224 @@ int process_cli_requests(int svr_socket){
         inet_ntop(AF_INET, &(cli_addr.sin_addr), client_ip, INET_ADDRSTRLEN);
         printf("Client connected from %s:%d\n", client_ip, ntohs(cli_addr.sin_port));
 
-        rc = exec_client_requests(cli_socket);
+        if (use_threads) {
+            pthread_t thread_id;
+            int *client_sock = malloc(sizeof(int));
+            *client_sock = cli_socket;
 
-        stop_server(cli_socket);
-
-        if (rc == OK_EXIT) {
-            printf("%s", RCMD_MSG_SVR_STOP_REQ);
-            break;
+            if (pthread_create(&thread_id, NULL, handle_client, client_sock) != 0) {
+                perror("pthread_create");
+                free(client_sock);
+                stop_server(cli_socket);
+                printf("Failed to create thread for client\n");
+            }
         } else {
-            printf("%s", RCMD_MSG_CLIENT_EXITED);
-        }
-    }  
+
+            rc = exec_client_requests(cli_socket);
+            
+            stop_server(cli_socket);
+
+            if (rc == OK_EXIT) {
+                printf("%s", RCMD_MSG_SVR_STOP_REQ);
+                break;
+            } else {
+                printf("%s", RCMD_MSG_CLIENT_EXITED);
+            }
+        }  
+    }
+
     return rc;
 }
 
-/*
- * exec_client_requests(cli_socket)
- *      cli_socket:  The server-side socket that is connected to the client
- *   
- *  This function handles accepting remote client commands. The function will
- *  loop and continue to accept and execute client commands.  There are 2 ways
- *  that this ongoing loop accepting client commands ends:
- * 
- *      1.  When the client executes the `exit` command, this function returns
- *          to process_cli_requests() so that we can accept another client
- *          connection. 
- *      2.  When the client executes the `stop-server` command this function
- *          returns to process_cli_requests() with a return code of OK_EXIT
- *          indicating that the server should stop. 
- * 
- *  Note that this function largely follows the implementation of the
- *  exec_local_cmd_loop() function that you implemented in the last 
- *  shell program deliverable. The main difference is that the command will
- *  arrive over the recv() socket call rather than reading a string from the
- *  keyboard. 
- * 
- *  This function also must send the EOF character after a command is
- *  successfully executed to let the client know that the output from the
- *  command it sent is finished.  Use the send_message_eof() to accomplish 
- *  this. 
- * 
- *  Of final note, this function must allocate a buffer for storage to 
- *  store the data received by the client. For example:
- *     io_buff = malloc(RDSH_COMM_BUFF_SZ);
- *  And since it is allocating storage, it must also properly clean it up
- *  prior to exiting.
- * 
- *  Returns:
- * 
- *      OK:       The client sent the `exit` command.  Get ready to connect
- *                another client. 
- *      OK_EXIT:  The client sent `stop-server` command to terminate the server
- * 
- *      ERR_RDSH_COMMUNICATION:  A catch all for any socket() related send
- *                or receive errors. 
- */
-int exec_client_requests(int cli_socket)
-{
-    int io_size;
-    command_list_t cmd_list;
-    int rc;
-    int cmd_rc;
-    int last_rc;
-    char *io_buff;
-
-    memset(&cmd_list, 0, sizeof(command_list_t));
-
-    io_buff = malloc(RDSH_COMM_BUFF_SZ);
-    if (io_buff == NULL)
+    /*
+     * exec_client_requests(cli_socket)
+     *      cli_socket:  The server-side socket that is connected to the client
+     *
+     *  This function handles accepting remote client commands. The function will
+     *  loop and continue to accept and execute client commands.  There are 2 ways
+     *  that this ongoing loop accepting client commands ends:
+     *
+     *      1.  When the client executes the `exit` command, this function returns
+     *          to process_cli_requests() so that we can accept another client
+     *          connection.
+     *      2.  When the client executes the `stop-server` command this function
+     *          returns to process_cli_requests() with a return code of OK_EXIT
+     *          indicating that the server should stop.
+     *
+     *  Note that this function largely follows the implementation of the
+     *  exec_local_cmd_loop() function that you implemented in the last
+     *  shell program deliverable. The main difference is that the command will
+     *  arrive over the recv() socket call rather than reading a string from the
+     *  keyboard.
+     *
+     *  This function also must send the EOF character after a command is
+     *  successfully executed to let the client know that the output from the
+     *  command it sent is finished.  Use the send_message_eof() to accomplish
+     *  this.
+     *
+     *  Of final note, this function must allocate a buffer for storage to
+     *  store the data received by the client. For example:
+     *     io_buff = malloc(RDSH_COMM_BUFF_SZ);
+     *  And since it is allocating storage, it must also properly clean it up
+     *  prior to exiting.
+     *
+     *  Returns:
+     *
+     *      OK:       The client sent the `exit` command.  Get ready to connect
+     *                another client.
+     *      OK_EXIT:  The client sent `stop-server` command to terminate the server
+     *
+     *      ERR_RDSH_COMMUNICATION:  A catch all for any socket() related send
+     *                or receive errors.
+     */
+    int exec_client_requests(int cli_socket)
     {
-        return ERR_RDSH_SERVER;
-    }
+        int io_size;
+        command_list_t cmd_list;
+        int rc;
+        int cmd_rc;
+        int last_rc;
+        char *io_buff;
 
-    while (1)
-    {
-        // TODO use recv() syscall to get input
+        memset(&cmd_list, 0, sizeof(command_list_t));
 
-        // TODO build up a cmd_list
-
-        // TODO rsh_execute_pipeline to run your cmd_list
-
-        // TODO send appropriate respones with send_message_string
-        // - error constants for failures
-        // - buffer contents from execute commands
-        //  - etc.
-
-        // TODO send_message_eof when done
-        io_size = recv(cli_socket, io_buff, RDSH_COMM_BUFF_SZ - 1, 0);
-
-        if (io_size <= 0)
+        io_buff = malloc(RDSH_COMM_BUFF_SZ);
+        if (io_buff == NULL)
         {
+            return ERR_RDSH_SERVER;
+        }
+
+        while (1)
+        {
+            // TODO use recv() syscall to get input
+
+            // TODO build up a cmd_list
+
+            // TODO rsh_execute_pipeline to run your cmd_list
+
+            // TODO send appropriate respones with send_message_string
+            // - error constants for failures
+            // - buffer contents from execute commands
+            //  - etc.
+
+            // TODO send_message_eof when done
+            io_size = recv(cli_socket, io_buff, RDSH_COMM_BUFF_SZ - 1, 0);
+
             if (io_size <= 0)
             {
-                perror("recv");
-            }
-            free(io_buff);
-            return ERR_RDSH_COMMUNICATION;
-        }
-
-        io_buff[io_size] = '\0';
-
-        printf(RCMD_MSG_SVR_EXEC_REQ, io_buff);
-
-        if (strcmp(io_buff, EXIT_CMD) == 0)
-        {
-            char *exit_msg = "Exiting...\n";
-            send_message_string(cli_socket, exit_msg);
-            break;
-        }
-        else if (strcmp(io_buff, "stop-server") == 0)
-        {
-            char *stop_msg = "Server shutting down...\n";
-            send_message_string(cli_socket, stop_msg);
-            free(io_buff);
-            return OK_EXIT;
-        } else {
-            if (strchr(io_buff, PIPE_CHAR))
-            {
-                
-                FILE *fp = popen(io_buff, "r");
-                if (fp)
+                if (io_size <= 0)
                 {
-                    char buffer[1024];
-                    while (fgets(buffer, sizeof(buffer), fp))
-                    {
-                        send_message_string(cli_socket, buffer);
-                    }
-                    pclose(fp);
-                    send_message_eof(cli_socket);
-                } else {
-                    send_message_string(cli_socket, "Error executing pipeline command\n");
+                    perror("recv");
                 }
-                continue; 
+                free(io_buff);
+                return ERR_RDSH_COMMUNICATION;
             }
 
-            rc = build_cmd_list(io_buff, &cmd_list);
+            io_buff[io_size] = '\0';
 
-            if (rc == WARN_NO_CMDS)
-            {
-                send_message_string(cli_socket, CMD_WARN_NO_CMD);
-                continue;
-            }
-            else if (rc == ERR_TOO_MANY_COMMANDS)
-            {
-                char error_msg[100];
-                sprintf(error_msg, CMD_ERR_PIPE_LIMIT, CMD_MAX);
-                send_message_string(cli_socket, error_msg);
-                continue;
-            }
-            else if (rc != OK)
-            {
-                char error_msg[100];
-                sprintf(error_msg, CMD_ERR_RDSH_ITRNL, rc);
-                send_message_string(cli_socket, error_msg);
-                continue;
-            }
+            printf(RCMD_MSG_SVR_EXEC_REQ, io_buff);
 
-            if (cmd_list.num == 1)
+            if (strcmp(io_buff, EXIT_CMD) == 0)
             {
-                cmd_buff_t *cmd = &(cmd_list.commands[0]);
-
-                if (cmd->argc > 0 && strcmp(cmd->argv[0], "cd") == 0)
+                char *exit_msg = "Exiting...\n";
+                send_message_string(cli_socket, exit_msg);
+                break;
+            }
+            else if (strcmp(io_buff, "stop-server") == 0)
+            {
+                char *stop_msg = "Server shutting down...\n";
+                send_message_string(cli_socket, stop_msg);
+                free(io_buff);
+                return OK_EXIT;
+            }
+            else
+            {
+                if (strchr(io_buff, PIPE_CHAR))
                 {
-                    if (cmd->argc > 1)
+
+                    FILE *fp = popen(io_buff, "r");
+                    if (fp)
                     {
-                        if (chdir(cmd->argv[1]) != 0)
+                        char buffer[1024];
+                        while (fgets(buffer, sizeof(buffer), fp))
                         {
-                            char error_msg[100];
-                            sprintf(error_msg, "cd: %s: No such file or directory\n", cmd->argv[1]);
-                            send_message_string(cli_socket, error_msg);
+                            send_message_string(cli_socket, buffer);
+                        }
+                        pclose(fp);
+
+                        send_message_eof(cli_socket);
+                    }
+                    else
+                    {
+                        send_message_string(cli_socket, "Error executing pipeline command\n");
+                    }
+                    continue;
+                }
+
+                rc = build_cmd_list(io_buff, &cmd_list);
+
+                if (rc == WARN_NO_CMDS)
+                {
+                    send_message_string(cli_socket, CMD_WARN_NO_CMD);
+                    continue;
+                }
+                else if (rc == ERR_TOO_MANY_COMMANDS)
+                {
+                    char error_msg[100];
+                    sprintf(error_msg, CMD_ERR_PIPE_LIMIT, CMD_MAX);
+                    send_message_string(cli_socket, error_msg);
+                    continue;
+                }
+                else if (rc != OK)
+                {
+                    char error_msg[100];
+                    sprintf(error_msg, CMD_ERR_RDSH_ITRNL, rc);
+                    send_message_string(cli_socket, error_msg);
+                    continue;
+                }
+
+                if (cmd_list.num == 1)
+                {
+                    cmd_buff_t *cmd = &(cmd_list.commands[0]);
+
+                    if (cmd->argc > 0 && strcmp(cmd->argv[0], "cd") == 0)
+                    {
+                        if (cmd->argc > 1)
+                        {
+                            if (chdir(cmd->argv[1]) != 0)
+                            {
+                                char error_msg[100];
+                                sprintf(error_msg, "cd: %s: No such file or directory\n", cmd->argv[1]);
+                                send_message_string(cli_socket, error_msg);
+                            }
+                            else
+                            {
+                                send_message_string(cli_socket, "");
+                            }
                         }
                         else
                         {
                             send_message_string(cli_socket, "");
                         }
-                    }
-                    else
-                    {
-                        send_message_string(cli_socket, "");
-                    }
 
-                    free_cmd_list(&cmd_list);
-                    continue;
+                        free_cmd_list(&cmd_list);
+                        continue;
+                    }
                 }
+
+                cmd_rc = rsh_execute_pipeline(cli_socket, &cmd_list);
+                last_rc = cmd_rc;
+
+                printf("DEBUG: Pipeline execution complete, about to send EOF\n");
+                fflush(stdout);
+
+                free_cmd_list(&cmd_list);
+                send_message_eof(cli_socket);
             }
-
-            cmd_rc = rsh_execute_pipeline(cli_socket, &cmd_list);
-            last_rc = cmd_rc;
-
-            printf("DEBUG: Pipeline execution complete, about to send EOF\n");
-            fflush(stdout);
-
-            free_cmd_list(&cmd_list);
-            send_message_eof(cli_socket);
         }
-    }
 
-    free(io_buff);
-    return last_rc;
+        free(io_buff);
+        return last_rc;
 }
 
 /*
@@ -442,17 +467,6 @@ int exec_client_requests(int cli_socket)
  *      ERR_RDSH_COMMUNICATION:  The send() socket call returned an error or if
  *           we were unable to send the EOF character. 
  */
-/*int send_message_eof(int cli_socket){
-    int send_len = (int)sizeof(RDSH_EOF_CHAR);
-    int sent_len;
-    sent_len = send(cli_socket, &RDSH_EOF_CHAR, send_len, 0);
-
-    if (sent_len != send_len){
-        return ERR_RDSH_COMMUNICATION;
-    }
-    return OK;
-}
-*/
 
 int send_message_eof(int cli_socket)
 {
@@ -756,4 +770,15 @@ Built_In_Cmds rsh_built_in_cmd(cmd_buff_t *cmd)
     default:
         return BI_NOT_BI;
     }
+}
+
+
+void *handle_client(void *arg) {
+    int cli_socket = *((int *)arg);
+    free(arg);
+
+    exec_client_requests(cli_socket);
+    pthread_detach(pthread_self());
+    
+    return NULL;
 }
